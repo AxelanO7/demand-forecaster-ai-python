@@ -1,124 +1,16 @@
-import pandas as pd
-import time
-import random
-import os
-import warnings
-from pytrends.request import TrendReq
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from datetime import datetime
-
-warnings.filterwarnings("ignore")
-
-# --- CONFIGURATION ---
-DISTRICT_FILE = 'District_rows.csv'
-SERVICE_FILE = 'ServiceSubCategory_rows.csv'
-OUTPUT_FILE = 'Bali_Forecast_Report_EN.xlsx' # Output filename in English
-
-# Volume Threshold (If average score is below this, switch to Proxy)
-VOLUME_THRESHOLD = 2.0 
-REGION_THRESHOLD = 2.0
-
-# Exclude Keywords
-EXCLUDE_KEYWORDS = [
-    'Strip', 'Summerlin', 'Henderson', 'Paradise', 
-    'Spring', 'Enterprise', 'Downtown', 'Winchester', 'Sunrise', 'Whitney'
-]
-
-# --- SMART MAPPING (English Service -> Indonesian Search Keyword) ---
-# We keep searching in Indo for accuracy, but report in English.
-KEYWORD_MAP = {
-    "Motorbike": "Sewa Motor",
-    "Car": "Sewa Mobil",
-    "Horse Riding": "Berkuda",
-    "Nightclub": "Club Malam",
-    "Club Crawl": "Party Bali",
-    "Fishing": "Mancing",
-    "Beauty": "Salon",
-    "Tattoo": "Tattoo",
-    "Tour": "Paket Wisata",
-    "Silver Class": "Silver Class",
-    "Diving": "Diving",
-    "Surfing": "Surfing",
-    "Jeep": "Sewa Jeep",
-    "Bottle Service": "Bar Bali",
-    "Trekking": "Trekking",
-    "Dayclub": "Beach Club",
-    "Zoo": "Kebun Binatang",
-    "Hair Color": "Salon Rambut",
-    "Rafting": "Rafting",
-    "Shows": "Tari Bali",
-    "Boat": "Tiket Boat",
-    "Laundry": "Laundry",
-    "ATV": "Main ATV",
-    "Spa": "Spa"
-}
-
-def load_data():
-    if not os.path.exists(DISTRICT_FILE) or not os.path.exists(SERVICE_FILE):
-        raise FileNotFoundError("❌ CSV Files not found!")
-    
-    df_dist = pd.read_csv(DISTRICT_FILE)
-    df_clean_dist = df_dist[~df_dist['district'].str.contains('|'.join(EXCLUDE_KEYWORDS), case=False, na=False)]
-    districts = df_clean_dist['district'].unique().tolist()
-    
-    df_serv = pd.read_csv(SERVICE_FILE)
-    services = df_serv['name'].dropna().unique().tolist()
-    clean_services = [s.split('/')[0].strip() for s in services]
-    
-    return districts, clean_services
-
-def get_forecast_logic(series):
-    try:
-        series_monthly = series.resample('MS').mean()
-        avg_volume = series_monthly.mean()
-        
-        if series_monthly.index[-1].day < 28:
-            series_clean = series_monthly[:-1] 
-        else:
-            series_clean = series_monthly
-            
-        if len(series_clean) < 3: return 0, 0, 0
-
-        model = ExponentialSmoothing(series_clean, trend='add', seasonal=None).fit()
-        forecast = model.forecast(2)
-        next_val = forecast.iloc[-1]
-        curr_val = series_clean.iloc[-1]
-        
-        if curr_val == 0:
-            growth = 100 if next_val > 0.1 else 0
-        else:
-            growth = ((next_val - curr_val) / curr_val) * 100
-            
-        return next_val, growth, avg_volume
-    except:
-        return 0, 0, 0
-
-def fetch_safe(pytrends, keywords):
-    attempts = 0
-    max_retries = 3
-    while attempts < max_retries:
-        try:
-            pytrends.build_payload(keywords, timeframe='today 12-m', geo='ID')
-            data = pytrends.interest_over_time()
-            return data
-        except Exception as e:
-            if '429' in str(e):
-                wait = 60 + (attempts * 30)
-                print(f"🛑 Rate Limit (429). Sleeping {wait}s...", end="")
-                time.sleep(wait)
-            else:
-                time.sleep(5)
-            attempts += 1
-            pytrends = TrendReq(hl='en-US', tz=360) 
-    return pd.DataFrame()
-
 def main():
     pytrends = TrendReq(hl='en-US', tz=360)
-    districts, services = load_data()
+    
+    try:
+        districts, services = load_data()
+    except Exception as e:
+        print(e)
+        return
 
-    # Smart Resume
+    # --- SMART RESUME & FAIL-SAFE CREATE ---
     existing_data = []
     processed_keys = set()
+    
     if os.path.exists(OUTPUT_FILE):
         print(f"🔄 Resuming from: {OUTPUT_FILE}")
         try:
@@ -128,8 +20,16 @@ def main():
         except: pass
     else:
         print(f"🆕 Creating new report: {OUTPUT_FILE}")
+        # FAIL-SAFE: Buat file kosong header dulu agar file fisik tercipta
+        dummy_df = pd.DataFrame(columns=[
+            'District', 'Service Category', 'Data Source', 'Forecast Index', 
+            'Growth %', 'Avg Volume', 'Market Status', 'Recommended Action'
+        ])
+        dummy_df.to_excel(OUTPUT_FILE, index=False)
 
     print(f"🚀 ENGINE STARTED (ENGLISH REPORT MODE)")
+    print("⏳ Warming up (10s)...") 
+    time.sleep(10) # Jeda awal agar tidak kaget
     print("-" * 60)
     
     try:
@@ -139,7 +39,10 @@ def main():
             if f"{services[0]} {district}" in processed_keys: continue 
 
             print(f"\n🌍 {district.upper()}...", end=" ")
-            time.sleep(random.uniform(2, 4))
+            
+            # Random sleep sebelum request pertama di loop
+            time.sleep(random.uniform(5, 8))
+            
             region_data = fetch_safe(pytrends, [proxy_kw])
             
             is_dead_region = True
@@ -158,38 +61,38 @@ def main():
             for item in services:
                 indo_item = KEYWORD_MAP.get(item, item)
                 
-                # Keywords
                 specific_kw = f"{indo_item} {district}"
                 proxy_service_kw = f"{indo_item} Bali" 
                 
-                if f"{item} {district}" in processed_keys: continue
+                # Cek Resume (Penting!)
+                resume_key = f"{item} {district}" # Pakai nama asli untuk key
+                if resume_key in processed_keys: 
+                    continue
 
                 if is_dead_region:
                     batch_data.append({
                         'District': district, 
-                        'Service Category': item, # English Name
+                        'Service Category': item, 
                         'Data Source': "❌ Skipped (Quiet Region)", 
-                        'Forecast Index': 0, 
-                        'Growth %': 0, 
-                        'Market Status': "➡️ STABLE", 
-                        'Recommended Action': "Maintain Visibility"
+                        'Forecast Index': 0, 'Growth %': 0, 'Avg Volume': 0,
+                        'Market Status': "➡️ STABLE", 'Recommended Action': "Maintain Visibility"
                     })
                     print(".", end="")
                 else:
-                    # Check Specific
                     print(f"\n   🔍 {specific_kw:<30}", end=" ")
-                    time.sleep(random.uniform(3, 5))
+                    time.sleep(random.uniform(5, 10)) # Sleep standar
+                    
                     data = fetch_safe(pytrends, [specific_kw])
                     
                     final_growth = 0
                     forecast_val = 0
+                    vol = 0
                     data_source = "❌ Niche Market"
                     status = "UNKNOWN"
                     action = "Manual Check"
                     
                     use_proxy = False
                     
-                    # Analyze Specific Data
                     if not data.empty and specific_kw in data.columns:
                         series = data[specific_kw]
                         pred, growth, vol = get_forecast_logic(series)
@@ -206,15 +109,13 @@ def main():
                         use_proxy = True
                         print(f"No Data -> Proxy...", end="")
                         
-                    # Proxy Logic
                     if use_proxy:
-                        time.sleep(random.uniform(3, 5))
+                        time.sleep(random.uniform(4, 6))
                         proxy_data = fetch_safe(pytrends, [proxy_service_kw])
                         
                         if not proxy_data.empty and proxy_service_kw in proxy_data.columns:
                             series = proxy_data[proxy_service_kw]
-                            pred, growth, vol = get_forecast_logic(series)
-                            
+                            pred, growth, p_vol = get_forecast_logic(series)
                             final_growth = growth
                             forecast_val = pred 
                             data_source = "🔄 Proxy (Bali Trend)"
@@ -222,24 +123,16 @@ def main():
                         else:
                             print(" Proxy Empty.", end="")
 
-                    # English Status Logic
                     if "✅" in data_source or "🔄" in data_source:
-                        if final_growth > 20: 
-                            status = "🔥 HIGH DEMAND"
-                            action = "Increase Inventory / Ads"
-                        elif final_growth < -15: 
-                            status = "❄️ LOW DEMAND"
-                            action = "Discount / Bundle Offer"
-                        else: 
-                            status = "➡️ STABLE"
-                            action = "Maintain Stock"
+                        if final_growth > 20: status, action = "🔥 HIGH DEMAND", "Increase Inventory / Ads"
+                        elif final_growth < -15: status, action = "❄️ LOW DEMAND", "Discount / Bundle Offer"
+                        else: status, action = "➡️ STABLE", "Maintain Stock"
                     elif data_source == "❌ Niche Market":
-                         status = "💤 LOW VOLUME"
-                         action = "Organic Growth Only"
+                         status, action = "💤 LOW VOLUME", "Organic Growth Only"
 
                     batch_data.append({
                         'District': district, 
-                        'Service Category': item, # English Name
+                        'Service Category': item, 
                         'Data Source': data_source,
                         'Forecast Index': round(forecast_val, 1),
                         'Growth %': round(final_growth, 1),
@@ -248,13 +141,15 @@ def main():
                         'Recommended Action': action
                     })
 
-            existing_data.extend(batch_data)
-            pd.DataFrame(existing_data).to_excel(OUTPUT_FILE, index=False)
+                # Tambahkan ke processed keys agar tidak double
+                processed_keys.add(resume_key)
+
+            # SAVE PER DISTRICT
+            if batch_data:
+                existing_data.extend(batch_data)
+                pd.DataFrame(existing_data).to_excel(OUTPUT_FILE, index=False)
             
     except KeyboardInterrupt:
-        print("\n🛑 PAUSED.")
+        print("\n🛑 PAUSED. Data saved safely.")
 
     print(f"\n✅ FINISHED. Report saved to: {OUTPUT_FILE}")
-
-if __name__ == "__main__":
-    main()
