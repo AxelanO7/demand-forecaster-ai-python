@@ -5,9 +5,11 @@ import random
 import os
 from datetime import datetime, timedelta
 
-# --- KONFIGURASI ---
-DISTRICT_FILE = 'data/raw/District_rows.csv' # Sesuaikan path folder Anda
-OUTPUT_FILE = 'data/output/Bali_OTA_Supply_Data.xlsx'
+# --- KONFIGURASI PATH DINAMIS ---
+# Ini akan mencari folder 'data' relatif terhadap lokasi script ini
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DISTRICT_FILE = os.path.join(BASE_DIR, 'data', 'raw', 'District_rows.csv')
+OUTPUT_FILE = os.path.join(BASE_DIR, 'data', 'output', 'Bali_OTA_Supply_Data.xlsx')
 
 # Filter Wilayah Non-Bali
 EXCLUDE_KEYWORDS = [
@@ -15,52 +17,48 @@ EXCLUDE_KEYWORDS = [
     'Spring', 'Enterprise', 'Downtown', 'Winchester', 'Sunrise', 'Whitney'
 ]
 
-# TANGGAL CEK: Kita cek availability untuk Weekend di Bulan Depan
-# (Misal: Checkin 30 hari lagi, Checkout 31 hari lagi)
+# TANGGAL CEK: Weekend Bulan Depan (30 hari dari sekarang)
 CHECKIN_DATE = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
 CHECKOUT_DATE = (datetime.now() + timedelta(days=31)).strftime("%Y-%m-%d")
 
 async def get_booking_count(page, district):
     """
-    Membuka Booking.com dan mengambil jumlah properti yang tersedia.
+    Scrape jumlah properti tersedia di Booking.com
     """
-    # URL Pattern Booking.com (Direct Search)
+    # URL Search Langsung
     url = f"https://www.booking.com/searchresults.en-gb.html?ss={district}, Bali, Indonesia&checkin={CHECKIN_DATE}&checkout={CHECKOUT_DATE}&group_adults=2&no_rooms=1&group_children=0"
     
     try:
-        # Buka halaman
-        await page.goto(url, timeout=60000) # 60 detik timeout
+        await page.goto(url, timeout=60000) # 60s timeout
         
-        # Tunggu loading selesai (kadang ada captcha ringan)
-        # Kita tunggu elemen H1 yang berisi jumlah properti
+        # Tunggu elemen H1 (biasanya berisi count)
         try:
-            # Selector H1 biasanya berisi: "Ubud: 1,230 properties found"
+            # Selector H1 di Booking.com berisi text seperti "Ubud: 1,230 properties found"
             h1_element = await page.wait_for_selector('h1', timeout=10000)
             text = await h1_element.inner_text()
             
-            # Parsing Text: "Ubud: 1,230 properties found" -> ambil angka
-            # Hapus karakter non-digit
+            # Ambil angka dari teks
             import re
             numbers = re.findall(r'\d+', text.replace(',', ''))
             
             if numbers:
-                # Angka biasanya yang terbesar (misal ada "2 adults" vs "1200 properties")
+                # Ambil angka terbesar (untuk menghindari angka kecil seperti "2 adults")
                 count = max([int(n) for n in numbers])
                 return count, text
             else:
                 return 0, "No Number Found"
                 
         except Exception:
-            # Kadang layout beda, Booking.com sering A/B testing
             return 0, "Layout Changed/Captcha"
 
     except Exception as e:
         return 0, f"Error Load: {str(e)}"
 
 async def main():
-    # 1. Load Data Wilayah
+    # 1. Load Data
     if not os.path.exists(DISTRICT_FILE):
-        print("❌ File District tidak ditemukan.")
+        print(f"❌ File District tidak ditemukan di: {DISTRICT_FILE}")
+        print("👉 Pastikan Anda sudah membuat folder 'data/raw' dan menaruh CSV di sana.")
         return
 
     df_dist = pd.read_csv(DISTRICT_FILE)
@@ -68,24 +66,25 @@ async def main():
     districts = df_clean['district'].unique().tolist()
     
     print(f"🚀 OTA SCRAPER STARTED | Target: {len(districts)} Districts")
-    print(f"📅 Checking for: {CHECKIN_DATE}")
+    print(f"📂 Reading from: {DISTRICT_FILE}")
+    print(f"📅 Check-in Date: {CHECKIN_DATE}")
     print("-" * 60)
 
     results = []
-    
+    processed_districts = []
+
     # Smart Resume
     if os.path.exists(OUTPUT_FILE):
         print(f"🔄 Resuming from {OUTPUT_FILE}...")
-        df_exist = pd.read_excel(OUTPUT_FILE)
-        results = df_exist.to_dict('records')
-        processed_districts = [r['District'] for r in results]
-    else:
-        processed_districts = []
-
-    # Mulai Browser (Headless = False supaya terlihat seperti manusia & bisa debug)
+        try:
+            df_exist = pd.read_excel(OUTPUT_FILE)
+            results = df_exist.to_dict('records')
+            processed_districts = [r['District'] for r in results]
+        except: pass
+    
+    # Jalankan Browser (Headless=False agar terlihat seperti manusia)
     async with async_playwright() as p:
-        # Gunakan Chrome/Chromium
-        browser = await p.chromium.launch(headless=False) 
+        browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
@@ -97,8 +96,8 @@ async def main():
 
             print(f"🌍 Checking Supply: {district.upper()}...", end=" ")
             
-            # Random Sleep agar tidak diblokir (Penting untuk OTA!)
-            await asyncio.sleep(random.uniform(3, 6))
+            # Random sleep wajib untuk OTA
+            await asyncio.sleep(random.uniform(4, 7))
             
             count, raw_text = await get_booking_count(page, district)
             
@@ -108,7 +107,7 @@ async def main():
             elif count > 0: status = "🔴 LOW SUPPLY (SCARCITY)"
             else: status = "❌ ERROR/BLOCKED"
 
-            print(f"-> {count} Properties Found.")
+            print(f"-> {count} Properties.")
 
             results.append({
                 'District': district,
