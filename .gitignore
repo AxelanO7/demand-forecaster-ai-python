@@ -8,4 +8,5 @@ venv/
 .DS_Store
 
 # Data Output (Opsional: kalau mau share hasil excel, jangan ignore ini)
-# data/output/*.xlsx
+data/output/*.xlsx
+data/raw/
