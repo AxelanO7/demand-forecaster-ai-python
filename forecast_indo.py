@@ -12,11 +12,10 @@ warnings.filterwarnings("ignore")
 # --- KONFIGURASI ---
 DISTRICT_FILE = 'District_rows.csv'
 SERVICE_FILE = 'ServiceSubCategory_rows.csv'
-OUTPUT_FILE = 'Bali_Forecast_Indo_Fixed.xlsx'
+OUTPUT_FILE = 'Bali_Forecast_Final.xlsx'
 
-# Ambang Batas: Jika rata-rata skor di bawah ini, dianggap "Hantu" (Low Volume)
-VOLUME_THRESHOLD = 1.0 
-REGION_THRESHOLD = 2
+# Jika rata-rata skor spesifik di bawah ini, kita pindah ke Proxy Bali
+VOLUME_THRESHOLD = 2.0 
 
 EXCLUDE_KEYWORDS = [
     'Strip', 'Summerlin', 'Henderson', 'Paradise', 
@@ -67,13 +66,9 @@ def load_data():
 
 def get_forecast_logic(series):
     try:
-        # Resample Bulanan
         series_monthly = series.resample('MS').mean()
-        
-        # Hitung Rata-rata Volume Setahun (Penting!)
         avg_volume = series_monthly.mean()
         
-        # Hapus bulan berjalan
         if series_monthly.index[-1].day < 28:
             series_clean = series_monthly[:-1] 
         else:
@@ -86,10 +81,8 @@ def get_forecast_logic(series):
         next_val = forecast.iloc[-1]
         curr_val = series_clean.iloc[-1]
         
-        # Logic Growth yang Lebih Jujur
         if curr_val == 0:
-            if next_val > 0.1: growth = 100 # Dari 0 jadi ada = Naik 100%
-            else: growth = 0 # Tetap mati
+            growth = 100 if next_val > 0.1 else 0
         else:
             growth = ((next_val - curr_val) / curr_val) * 100
             
@@ -97,7 +90,7 @@ def get_forecast_logic(series):
     except:
         return 0, 0, 0
 
-def fetch_safe(pytrends, keywords, context="Data"):
+def fetch_safe(pytrends, keywords):
     attempts = 0
     max_retries = 3
     while attempts < max_retries:
@@ -108,7 +101,7 @@ def fetch_safe(pytrends, keywords, context="Data"):
         except Exception as e:
             if '429' in str(e):
                 wait = 60 + (attempts * 30)
-                print(f"\n🛑 429 Limit. Tidur {wait}s...", end="")
+                print(f"🛑 429 Limit. Tidur {wait}s...", end="")
                 time.sleep(wait)
             else:
                 time.sleep(5)
@@ -131,14 +124,14 @@ def main():
             processed_keys = set([f"{row['Service']} {row['District']}" for row in existing_data])
         except: pass
     else:
-        print(f"🆕 File: {OUTPUT_FILE}")
+        print(f"🆕 File Baru: {OUTPUT_FILE}")
 
-    print(f"🚀 ENGINE STARTED (FIXED LOGIC)")
+    print(f"🚀 ENGINE STARTED (HYBRID PROXY)")
     print("-" * 60)
     
     try:
         for district in districts:
-            # 1. Cek Wilayah
+            # 1. Cek Wilayah (Filter Cepat)
             proxy_kw = f"{district} Bali"
             if f"{services[0]} {district}" in processed_keys: continue 
 
@@ -149,7 +142,7 @@ def main():
             is_dead_region = True
             if not region_data.empty and proxy_kw in region_data.columns:
                 score = region_data[proxy_kw].mean()
-                if score >= REGION_THRESHOLD:
+                if score >= 2: # Threshold wilayah
                     is_dead_region = False
                     print(f"✅ AKTIF (Avg: {score:.1f})")
                 else:
@@ -161,60 +154,84 @@ def main():
             batch_data = []
             for item in services:
                 indo_item = KEYWORD_MAP.get(item, item)
-                search_kw = f"{indo_item} {district}"
+                
+                # KEYWORD A: SPESIFIK (Misal: "Sewa Motor Kuta")
+                specific_kw = f"{indo_item} {district}"
+                
+                # KEYWORD B: PROXY BALI (Misal: "Sewa Motor Bali")
+                # Kita pakai ini kalau Keyword A kosong
+                proxy_service_kw = f"{indo_item} Bali" 
                 
                 if f"{item} {district}" in processed_keys: continue
 
                 if is_dead_region:
                     batch_data.append({
-                        'District': district, 'Service': item, 'Search Keyword': search_kw,
+                        'District': district, 'Service': item, 'Search Keyword': specific_kw,
                         'Data Source': "❌ Skipped", 'Forecast Index': 0, 
-                        'Growth Forecast %': 0, 'Avg Score': 0,
-                        'Status': "➡️ STABLE", 'Action Plan': "Maintain"
+                        'Growth Forecast %': 0, 'Status': "➡️ STABLE", 'Action Plan': "Maintain"
                     })
                     print(".", end="")
                 else:
-                    print(f"\n   🔍 {search_kw:<35}", end=" ")
-                    time.sleep(random.uniform(4, 7))
-                    data = fetch_safe(pytrends, [search_kw])
+                    # COBA KEYWORD SPESIFIK DULU
+                    print(f"\n   🔍 {specific_kw:<30}", end=" ")
+                    time.sleep(random.uniform(3, 5))
+                    data = fetch_safe(pytrends, [specific_kw])
                     
                     final_growth = 0
-                    avg_vol = 0
+                    forecast_val = 0
                     data_source = "❌ Niche"
                     status = "UNKNOWN"
                     action = "Check"
-                    forecast_val = 0
-
-                    if not data.empty and search_kw in data.columns:
-                        series = data[search_kw]
+                    
+                    use_proxy = False
+                    
+                    # Cek Data Spesifik
+                    if not data.empty and specific_kw in data.columns:
+                        series = data[specific_kw]
                         pred, growth, vol = get_forecast_logic(series)
-                        final_growth = growth
-                        forecast_val = pred
-                        avg_vol = vol
                         
-                        if vol < VOLUME_THRESHOLD:
-                            data_source = "⚠️ Low Vol"
-                            print(f"Low Vol ({vol:.1f})", end="")
-                        else:
+                        if vol >= VOLUME_THRESHOLD:
+                            # DATA BAGUS!
+                            final_growth = growth
+                            forecast_val = pred
                             data_source = "✅ Direct"
                             print(f"Growth: {int(growth)}% (Vol: {vol:.1f})", end="")
+                        else:
+                            # DATA JELEK -> GANTI KE PROXY
+                            use_proxy = True
+                            print(f"Vol Rendah ({vol:.1f}) -> Cek Proxy...", end="")
                     else:
-                        print("No Data", end="")
-                    
-                    # Status Logic Baru
-                    if data_source == "✅ Direct":
+                        use_proxy = True
+                        print(f"No Data -> Cek Proxy...", end="")
+                        
+                    # JIKA PERLU PROXY (Fallback Logic)
+                    if use_proxy:
+                        time.sleep(random.uniform(3, 5))
+                        proxy_data = fetch_safe(pytrends, [proxy_service_kw])
+                        
+                        if not proxy_data.empty and proxy_service_kw in proxy_data.columns:
+                            series = proxy_data[proxy_service_kw]
+                            pred, growth, vol = get_forecast_logic(series)
+                            
+                            final_growth = growth
+                            forecast_val = pred # Ini angka Bali, bukan Kuta (hanya referensi trend)
+                            data_source = "🔄 Proxy (Bali Trend)"
+                            print(f" [PROXY] Growth: {int(growth)}%", end="")
+                        else:
+                            print(" Proxy juga kosong.", end="")
+
+                    # Status Logic
+                    if "✅" in data_source or "🔄" in data_source:
                         if final_growth > 20: status, action = "🔥 HOT", "Stock Up"
                         elif final_growth < -15: status, action = "❄️ COLD", "Discount"
                         else: status, action = "➡️ STABLE", "Maintain"
-                    elif data_source == "⚠️ Low Vol":
-                         status, action = "💤 QUIET", "Organic Only"
 
                     batch_data.append({
-                        'District': district, 'Service': item, 'Search Keyword': search_kw,
+                        'District': district, 'Service': item, 
+                        'Search Keyword': specific_kw,
                         'Data Source': data_source,
                         'Forecast Index': round(forecast_val, 1),
                         'Growth Forecast %': round(final_growth, 1),
-                        'Avg Score': round(avg_vol, 1), # Kolom Baru
                         'Status': status, 'Action Plan': action
                     })
 
