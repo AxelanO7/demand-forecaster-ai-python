@@ -1,26 +1,11 @@
-# Folder Virtual Environment (Sesuai gambar kamu)
-venv/
-env/
-.venv/
-
-# Python compiled files (File sampah otomatis dari Python)
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Environment variables (Sangat PENTING agar password/API key tidak bocor)
+*.py[cod]
+venv/
 .env
-.env.local
 
-# OS generated files (File sampah dari Mac/Windows)
+# Mac
 .DS_Store
-Thumbs.db
 
-# Editor directories (Optional, settingan VS Code user)
-.vscode/
-.idea/
-
-# Data
-District_rows.csv
-ServiceSubCategory_rows.csv
+# Data Output (Opsional: kalau mau share hasil excel, jangan ignore ini)
+# data/output/*.xlsx
